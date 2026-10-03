@@ -1,4 +1,4 @@
-# FastAPI + Docker + Kubernetes + HPA
+# FastAPI + Docker + Kubernetes + HPA — Setup Guide
 
 This guide deploys the HousePred model as a conventional Python application:
 

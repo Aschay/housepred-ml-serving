@@ -1,4 +1,4 @@
-# KServe + Knative + Kourier — Setup Guide
+# KServe + Knative  — Setup Guide
 
 This guide documents the **KServe + Knative serverless deployment** implemented for HousePred.
 

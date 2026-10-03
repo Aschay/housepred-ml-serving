@@ -1,4 +1,4 @@
-# BentoML + Docker + Kubernetes + HPA
+# BentoML + Docker + Kubernetes + HPA — Setup Guide
 
 This guide deploys the HousePred model using BentoML as the ML-serving layer.
 

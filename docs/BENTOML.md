@@ -1,100 +1,129 @@
-# BentoML
+# BentoML + Docker + Kubernetes + HPA
 
-This guide deploys the HousePred model using BentoML, then runs the resulting container on Kubernetes with a Service and HPA.
+This guide deploys the HousePred model using BentoML as the ML-serving layer.
+
+```text
+HousePred model
+      ↓
+BentoML Service
+      ↓
+Bento
+      ↓
+Container image
+      ↓
+Kubernetes Deployment
+      ↓
+Kubernetes Service
+      ↓
+HPA
+```
+
+The purpose of this deployment is to show what changes when the serving layer is provided by an ML-focused framework instead of being implemented directly with FastAPI.
 
 ## 1. Prerequisites
 
+### Requirements
+
 * Python 3.12
-* Docker
+* A container runtime
+* A Kubernetes cluster
+* BentoML
+* A working HousePred project
+
+### Local Environment Used
+
+* Docker Desktop
 * Docker Desktop Kubernetes
-* `kubectl`
 * BentoML 1.4.39
-
-Install BentoML:
-
-```bash
-python -m pip install bentoml
-```
 
 Verify:
 
 ```bash
+python --version
+docker --version
 bentoml --version
 ```
 
----
+## 2. Project Structure
 
-## 2. BentoML Service
-
-Create `service.py`:
-
-```python
-import bentoml
-import joblib
-import numpy as np
-
-model = joblib.load("model/linear_regression_model.joblib")
-
-@bentoml.service
-class HousePriceService:
-
-    @bentoml.api
-    def predict(
-        self,
-        MedInc: float,
-        Latitude: float,
-        Longitude: float,
-        AveRooms: float,
-        HouseAge: float,
-    ) -> float:
-        X = np.array([[
-            MedInc,
-            Latitude,
-            Longitude,
-            AveRooms,
-            HouseAge,
-        ]])
-
-        prediction = model.predict(X)[0]
-        return float(prediction)
-```
-
-BentoML provides the serving infrastructure around this API, including API documentation, health endpoints, readiness/liveness endpoints, metrics, and logging.
-
-The inference endpoint is:
+The relevant BentoML files are:
 
 ```text
-POST /predict
+BentoML/
+├── service.py
+├── bentofile.yaml
+├── model/
+│   └── linear_regression_model.joblib
+├── k8s/
+│   ├── bento-housepred.yaml
+│   └── bento-housepred-hpa.yaml
+└── misc/
+    ├── bento-register-model.py
+    └── bento-service-modelstore.py
 ```
 
-BentoML also exposes:
+The `misc/` scripts are used for model-store experiments and are not required to run the packaged Bento.
+
+The model is the same California Housing regression model used by the FastAPI implementation.
+
+## 3. BentoML Service
+
+The serving application is defined as a BentoML service.
+
+Conceptually:
 
 ```text
-GET /healthz
-GET /livez
-GET /readyz
-GET /metrics
+Client
+  │
+  ▼
+BentoML
+  │
+  └── HousePriceService
+          │
+          ▼
+       ML model
 ```
 
-These are BentoML's built-in infrastructure endpoints; they do not need to be implemented in `service.py`.
+The service defines the prediction API while BentoML provides the serving infrastructure around it.
 
----
-
-## 3. Test the Service Locally
-
-Start BentoML:
+The service can be started locally with:
 
 ```bash
 bentoml serve service:HousePriceService
 ```
 
-The service runs on:
+The server listens on:
 
 ```text
 http://localhost:3000
 ```
 
-Test prediction:
+### What BentoML provides
+
+Compared with implementing the serving layer directly with FastAPI, BentoML provides a number of ML-serving capabilities around the service, including:
+
+* HTTP serving
+* OpenAPI API documentation
+* Swagger UI
+* health endpoints
+* Prometheus-compatible metrics
+* server/access logging
+* tracing support
+* model management through the BentoML Model Store
+* standardized packaging through Bentos
+* container generation for deployment
+
+The important distinction is that these capabilities are part of the BentoML serving layer rather than application code that must all be implemented independently.
+
+## 4. Test the BentoML Service
+
+The prediction endpoint is:
+
+```text
+POST /predict
+```
+
+Test it with:
 
 ```bash
 curl -X POST http://localhost:3000/predict \
@@ -102,23 +131,17 @@ curl -X POST http://localhost:3000/predict \
   -d '{"MedInc":8.3252,"Latitude":37.88,"Longitude":-122.23,"AveRooms":6.9841,"HouseAge":41.0}'
 ```
 
-Expected result:
+The completed service returned:
 
 ```text
 4.080089668998603
 ```
 
-BentoML also provides Swagger/OpenAPI documentation at:
+BentoML also exposes API documentation through the running server.
 
-```text
-http://localhost:3000
-```
+## 5. Bento Configuration
 
----
-
-## 4. Bento Configuration
-
-Create `bentofile.yaml`:
+The project uses `bentofile.yaml`:
 
 ```yaml
 service: "service:HousePriceService"
@@ -126,58 +149,58 @@ service: "service:HousePriceService"
 include:
   - "service.py"
   - "model/linear_regression_model.joblib"
-
-python:
-  packages:
-    - bentoml==1.4.39
-    - scikit-learn==1.9.0
-    - joblib==1.5.3
-    - numpy==2.4.2
-    - pandas==3.0.6
-    - scipy==1.18.1
-    - threadpoolctl==3.7.0
 ```
 
-The `include` section packages both the service code and the trained model into the Bento.
+The `service` field identifies the BentoML service.
 
----
+The `include` section packages the service code and model artifact into the Bento.
 
-## 5. Build the Bento
+## 6. Build the Bento
 
-Run:
+Build the deployable Bento with:
 
 ```bash
 bentoml build
 ```
 
-The resulting Bento is identified by its name and version, for example:
+BentoML reads `bentofile.yaml` from the current directory.
 
-```text
-house_price_service:k4p3o6v6pgcsjabl
-```
-
-List available Bentos:
+List the available Bentos:
 
 ```bash
 bentoml list
 ```
 
----
+The completed project produced:
 
-## 6. BentoML Model Store
+```text
+house_price_service:k4p3o6v6pgcsjabl
+```
 
-The trained model can also be registered in BentoML's Model Store:
+The version identifier is generated by BentoML and can differ between builds.
 
-```python
-import bentoml
-import joblib
+Conceptually:
 
-model = joblib.load("model/linear_regression_model.joblib")
+```text
+service.py
+    │
+    ▼
+bentoml build
+    │
+    ▼
+Bento
+    │
+    └── versioned deployable artifact
+```
 
-bentoml.sklearn.save_model(
-    "house_price_model",
-    model,
-)
+## 7. BentoML Model Store
+
+BentoML also provides a Model Store for registering and versioning model artifacts.
+
+The completed project registered:
+
+```text
+house_price_model:henca7f6ps2dnabl
 ```
 
 List registered models:
@@ -186,31 +209,70 @@ List registered models:
 bentoml models list
 ```
 
-The Kubernetes container used in this project loads the `.joblib` file directly from the Bento rather than loading the model from the BentoML Model Store.
+A registered model can be loaded by the service with:
 
----
+```python
+model = bentoml.sklearn.load_model(
+    "house_price_model:henca7f6ps2dnabl"
+)
+```
 
-## 7. Containerize the Bento
+The Model Store and the Bento are separate concepts:
 
-Create the Docker image from the Bento:
+```text
+Model Store
+    │
+    └── versioned model artifact
+
+Bento
+    │
+    └── versioned deployable service
+```
+
+The Model Store manages model artifacts, while the Bento packages the serving application and its dependencies.
+
+## 8. Containerize the Bento
+
+The completed Bento can be converted into a Docker image:
 
 ```bash
 bentoml containerize house_price_service:k4p3o6v6pgcsjabl
 ```
 
-BentoML produces an image tagged:
+The resulting image is:
 
 ```text
 house_price_service:k4p3o6v6pgcsjabl
 ```
 
-Run it locally:
+Conceptually:
 
-```bash
-docker run --rm -p 3000:3000 house_price_service:k4p3o6v6pgcsjabl
+```text
+Bento
+  ↓
+BentoML containerize
+  ↓
+Docker image
 ```
 
-Test:
+This means the same packaged Bento can be deployed using a container runtime rather than requiring BentoML to be installed separately inside the deployment environment.
+
+## 9. Run the Container
+
+Run the generated image locally:
+
+```bash
+docker run --rm -p 3000:3000 \
+  house_price_service:k4p3o6v6pgcsjabl
+```
+
+The service is then available at:
+
+```text
+http://localhost:3000
+```
+
+Test the prediction endpoint:
 
 ```bash
 curl -X POST http://localhost:3000/predict \
@@ -218,142 +280,115 @@ curl -X POST http://localhost:3000/predict \
   -d '{"MedInc":8.3252,"Latitude":37.88,"Longitude":-122.23,"AveRooms":6.9841,"HouseAge":41.0}'
 ```
 
----
+## 10. Metrics and Observability
 
-## 8. Built-in Metrics
-
-BentoML exposes Prometheus-compatible metrics at:
+BentoML exposes Prometheus-compatible metrics through:
 
 ```text
-GET /metrics
+/metrics
 ```
 
-For example:
+Check them with:
 
 ```bash
 curl http://localhost:3000/metrics
 ```
 
-The metrics include request counts, requests in progress, request duration, and request timestamps.
+The completed service exposed metrics including:
 
-This gives the BentoML serving layer built-in observability without implementing application-level metrics manually.
-
----
-
-## 9. Kubernetes Namespace
-
-Create the namespace:
-
-```bash
-kubectl create namespace bentoml
+```text
+bentoml_service_request_total
+bentoml_service_request_duration_seconds
+bentoml_service_request_in_progress
+bentoml_service_last_request_timestamp_seconds
 ```
 
----
+These metrics provide request-level observability without requiring the application to implement its own request metrics.
 
-## 10. Kubernetes Deployment
+BentoML also provides configurable logging and tracing capabilities around the serving process.
 
-The BentoML container runs as a normal Kubernetes Deployment.
+## 11. Kubernetes Deployment
 
-```yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: housepred-bento
-  namespace: bentoml
-spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app: housepred-bento
-  template:
-    metadata:
-      labels:
-        app: housepred-bento
-    spec:
-      containers:
-        - name: housepred
-          image: house_price_service:k4p3o6v6pgcsjabl
-          imagePullPolicy: Never
-          ports:
-            - containerPort: 3000
+The generated BentoML container can be deployed to Kubernetes like a conventional containerized application.
 
-          livenessProbe:
-            httpGet:
-              path: /livez
-              port: 3000
-            initialDelaySeconds: 10
-            periodSeconds: 10
+Conceptually:
 
-          readinessProbe:
-            httpGet:
-              path: /readyz
-              port: 3000
-            initialDelaySeconds: 5
-            periodSeconds: 5
-
-          resources:
-            requests:
-              cpu: "100m"
-              memory: "128Mi"
-            limits:
-              cpu: "500m"
-              memory: "512Mi"
+```text
+BentoML Bento
+      │
+      ▼
+Docker image
+      │
+      ▼
+Kubernetes Deployment
+      │
+      ▼
+BentoML Pod
 ```
 
-The probes use BentoML's built-in infrastructure endpoints:
+The project contains:
 
-* `/livez` → Kubernetes liveness probe
-* `/readyz` → Kubernetes readiness probe
+```text
+k8s/
+├── bento-housepred.yaml
+└── bento-housepred-hpa.yaml
+```
 
-Resource requests and limits are also defined so Kubernetes can schedule the workload and the HPA can calculate CPU utilization relative to the CPU request.
+The Deployment uses:
 
-Apply:
+```text
+Image:
+house_price_service:k4p3o6v6pgcsjabl
+
+Container port:
+3000
+
+Namespace:
+bentoml
+```
+
+Apply the deployment with:
 
 ```bash
-kubectl apply -f bento-deployment.yaml
+kubectl apply -f k8s/bento-housepred.yaml
 ```
 
 Check:
 
 ```bash
+kubectl get deployment -n bentoml
 kubectl get pods -n bentoml
 ```
 
----
+The completed deployment successfully ran the BentoML service as a Kubernetes Pod.
 
-## 11. Kubernetes Service
+## 12. Kubernetes Service
 
-Expose the BentoML application through a NodePort:
+The BentoML Pod is exposed through a Kubernetes Service.
 
-```yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: housepred-bento
-  namespace: bentoml
-spec:
-  type: NodePort
-  selector:
-    app: housepred-bento
-  ports:
-    - port: 3000
-      targetPort: 3000
-      nodePort: 30090
-```
+The project uses a `NodePort` .
 
-Apply:
-
-```bash
-kubectl apply -f bento-service.yaml
-```
-
-The service is available at:
+The request path is:
 
 ```text
-http://localhost:30090
+Client
+   ↓
+NodePort Service
+   ↓
+BentoML Pod
+   ↓
+BentoML
+   ↓
+HousePred model
 ```
 
-Test prediction:
+The configured NodePort is:
+
+```text
+30090
+```
+
+Test:
 
 ```bash
 curl -X POST http://localhost:30090/predict \
@@ -361,38 +396,26 @@ curl -X POST http://localhost:30090/predict \
   -d '{"MedInc":8.3252,"Latitude":37.88,"Longitude":-122.23,"AveRooms":6.9841,"HouseAge":41.0}'
 ```
 
----
+The NodePort is used here only for local testing; in production, the service would typically be exposed through the environment's normal ingress, Gateway API, or load-balancing layer.
 
-## 12. Kubernetes HPA
+## 13. HPA
 
-BentoML itself is not the Kubernetes autoscaler. Kubernetes HPA handles replica scaling.
+The BentoML deployment uses Kubernetes HPA for CPU-based autoscaling.
 
-```yaml
-apiVersion: autoscaling/v2
-kind: HorizontalPodAutoscaler
-metadata:
-  name: housepred
-  namespace: bentoml
-spec:
-  scaleTargetRef:
-    apiVersion: apps/v1
-    kind: Deployment
-    name: housepred-bento
-  minReplicas: 1
-  maxReplicas: 5
-  metrics:
-    - type: Resource
-      resource:
-        name: cpu
-        target:
-          type: Utilization
-          averageUtilization: 70
+The project configures:
+
+```text
+Minimum replicas: 1
+
+Maximum replicas: 5
+
+CPU target: 70%
 ```
 
-Apply:
+The HPA targets:
 
-```bash
-kubectl apply -f bento-hpa.yaml
+```text
+Deployment/housepred-bento
 ```
 
 Check:
@@ -401,213 +424,133 @@ Check:
 kubectl get hpa -n bentoml
 ```
 
-The HPA target is:
-
-```text
-70% average CPU utilization
-```
-
-CPU utilization is calculated relative to the container's CPU request:
-
-```text
-CPU utilization =
-    actual CPU usage / requested CPU
-```
-
-With:
-
-```yaml
-requests:
-  cpu: "100m"
-```
-
-70% corresponds to approximately:
-
-```text
-70m CPU
-```
-
-across the HPA's target calculation.
-
----
-
-## 13. Metrics Server
-
-The Kubernetes HPA requires resource metrics.
-
-Check Metrics Server:
+Detailed information:
 
 ```bash
-kubectl get pods -n kube-system | grep metrics-server
+kubectl describe hpa -n bentoml
 ```
 
-Verify metrics:
+The CPU target is evaluated relative to the CPU requests configured on the BentoML Pod.
+
+Conceptually:
+
+```text
+CPU metrics
+     │
+     ▼
+    HPA
+     │
+     ▼
+Deployment
+     │
+     ▼
+BentoML Pods
+```
+
+HPA therefore operates at the Kubernetes deployment layer rather than being a BentoML autoscaling mechanism.
+
+## 14. Metrics Server
+
+CPU-based Kubernetes HPA requires resource metrics.
+
+For the local Kubernetes environment, Metrics Server was installed while validating HPA behavior.
+
+Check:
 
 ```bash
 kubectl top pods -n bentoml
 ```
 
-Example:
+The Metrics Server provides the CPU metrics consumed by the HPA.
+
+It is part of the Kubernetes infrastructure supporting autoscaling, not part of the BentoML service itself.
+
+## 15. Scaling Model
+
+This deployment uses **resource-based autoscaling**:
 
 ```text
-NAME                               CPU(cores)   MEMORY(bytes)
-housepred-bento-...                3m           282Mi
+              CPU utilization
+                     │
+                     ▼
+                    HPA
+                     │
+                     ▼
+                Deployment
+                     │
+             ┌───────┴───────┐
+             ↓               ↓
+         fewer Pods       more Pods
 ```
 
-The HPA can then obtain CPU utilization from the Kubernetes Metrics API.
+The deployment starts with one Pod and can scale between one and five replicas according to the HPA configuration.
 
----
+Unlike the KServe + Knative deployment, this architecture does not provide Knative's request-driven scale-to-zero behavior.
 
-## 14. HPA Load Test
+## 16. BentoML vs FastAPI
 
-Generate continuous prediction traffic:
-
-```bash
-while true; do
-  curl -s -X POST http://localhost:30090/predict \
-    -H "Content-Type: application/json" \
-    -d '{"MedInc":8.3252,"Latitude":37.88,"Longitude":-122.23,"AveRooms":6.9841,"HouseAge":41.0}' > /dev/null
-done
-```
-
-In another terminal:
-
-```bash
-kubectl get hpa -n bentoml
-```
-
-The HPA can be observed receiving CPU metrics while traffic is running.
-
-For this project, the measured workload remained below the 70% threshold, so the Deployment correctly remained at one replica.
-
-The important part demonstrated here is the complete metrics path:
-
-```text
-BentoML Pod
-    ↓
-CPU usage
-    ↓
-Metrics Server
-    ↓
-HPA
-    ↓
-Kubernetes Deployment replicas
-```
-
----
-
-## 15. BentoML vs KServe Autoscaling
-
-BentoML and KServe solve different layers of the serving problem.
-
-### BentoML
-
-```text
-BentoML
-   ↓
-Docker image
-   ↓
-Kubernetes Deployment
-   ↓
-Kubernetes Service
-   ↓
-HPA
-```
-
-BentoML provides the application serving layer:
-
-* model-serving API
-* request validation
-* Swagger/OpenAPI
-* health endpoints
-* readiness/liveness endpoints
-* metrics
-* logging
-* containerization
-* Model Store
-
-Kubernetes provides:
-
-* scheduling
-* replicas
-* networking
-* resource management
-* HPA
-* infrastructure orchestration
-
-BentoML does not itself provide Knative-style request-driven scale-to-zero.
-
-### KServe + Knative
-
-```text
-KServe
-   ↓
-InferenceService
-   ↓
-Knative
-   ↓
-Kourier
-   ↓
-scale-to-zero
-```
-
-KServe integrates model serving with Kubernetes-native resources and, in Knative mode, provides request-driven autoscaling and scale-to-zero.
-
-This is a different architectural approach from putting a BentoML application inside a normal Kubernetes Deployment.
-
----
-
-## 16. Final Architecture
-
-The BentoML implementation is:
-
-```text
-HousePred Model
-      │
-      ▼
-   BentoML
-      │
-      ▼
-  Bento Build
-      │
-      ▼
- Docker Image
-      │
-      ▼
-Kubernetes Deployment
-      │
-      ├── /livez
-      ├── /readyz
-      ├── /metrics
-      └── /predict
-      │
-      ▼
- Kubernetes Service
-      │
-      ▼
- NodePort :30090
-      │
-      ▼
-     HPA
-      │
-      ▼
-Metrics Server
-      │
-      ▼
-1–5 Kubernetes replicas
-```
-
-The key distinction is:
+The key difference is the serving abstraction.
 
 ```text
 FastAPI
-    → build the serving application yourself
+    │
+    └── Developer builds the HTTP serving application
 
 BentoML
-    → standardized ML serving application + packaging
-
-KServe
-    → Kubernetes-native model-serving platform
+    │
+    └── Developer defines the ML service while BentoML
+        provides more of the serving infrastructure
 ```
 
-BentoML therefore sits between a hand-built FastAPI application and a Kubernetes-native serving platform such as KServe.
+FastAPI gives the developer a general-purpose web framework.
+
+BentoML provides a more specialized ML-serving layer around the model, including standardized packaging, model management, serving infrastructure, API documentation, metrics, and containerization.
+
+Both can ultimately be packaged as containers and deployed to Kubernetes.
+
+## 17. Final Architecture
+
+```text
+                         HousePred model
+                                │
+                                ▼
+                       BentoML Service
+                                │
+                                ▼
+                              Bento
+                                │
+                                ▼
+                         Docker image
+                                │
+                                ▼
+                    Kubernetes Deployment
+                                │
+                                ▼
+                       Kubernetes Service
+                                │
+                                ▼
+                           BentoML Pod
+                                ▲
+                                │
+                               HPA
+                                │
+                         CPU utilization
+```
+
+The important architectural boundary is:
+
+```text
+BentoML
+   → ML-serving abstraction and packaging
+
+Docker
+   → container packaging
+
+Kubernetes
+   → orchestration and networking
+
+HPA
+   → Kubernetes resource-based autoscaling
+```
+
+This provides the next level of abstraction after FastAPI: instead of implementing the complete ML-serving infrastructure directly in the application, the developer defines a BentoML service and lets BentoML provide more of the surrounding serving functionality.

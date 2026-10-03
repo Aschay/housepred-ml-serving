@@ -1,40 +1,79 @@
 # KServe + Knative + Kourier — Setup Guide
 
-This guide documents the KServe **Knative/serverless** deployment that was actually implemented for HousePred.
+This guide documents the **KServe + Knative serverless deployment** implemented for HousePred.
 
-The project did **not** implement KServe Standard deployment. Standard mode is discussed in the main architecture README, but this guide covers the Knative path only.
+The deployment demonstrates:
 
-The completed architecture is:
+* Kubernetes-native model serving with KServe
+* Knative-based serverless deployment
+* Kourier networking
+* request-driven autoscaling
+* scale-to-zero
+* scale-from-zero
+* cold-start vs warm-request behavior
+
+The high-level architecture is:
 
 ```text
-HousePred model
-      ↓
-PersistentVolumeClaim
-      ↓
-KServe InferenceService
-      ↓
-Knative Serving
-      ↓
-Kourier
-      ↓
-Kubernetes
+                         Client
+                           │
+                           ▼
+                        Kourier
+                           │
+                           ▼
+                    Knative Serving
+                           │
+                           ▼
+                    KServe Predictor
+                           │
+                           ▼
+                    sklearnserver
+                           │
+                           ▼
+                     HousePred
+                           │
+                           ▼
+                       Prediction
 ```
 
-The important feature demonstrated is **scale-to-zero**.
+The model artifact is stored separately:
+
+```text
+PersistentVolume
+       │
+       ▼
+      PVC
+       │
+       ▼
+linear_regression_model.joblib
+       │
+       ▼
+KServe Predictor
+```
 
 ---
 
 # 1. Prerequisites
 
-Required:
+## Requirements
+
+* A container runtime
+* A Kubernetes cluster
+* `kubectl`
+* Helm
+* Sufficient CPU and memory for Kubernetes, Knative, KServe, and the model-serving runtime
+
+## Local Environment
+
+The deployment was implemented using:
 
 * Docker Desktop
 * Docker Desktop Kubernetes
-* `kubectl`
-* Helm
-* Docker Desktop Kubernetes with sufficient CPU/memory
+* Docker Desktop `hostpath` storage
+* Windows
+* Git Bash
 
-Verify:
+Verify the environment:
 
 ```bash
 kubectl version --client
@@ -42,92 +81,160 @@ helm version
 kubectl get nodes
 ```
 
+The CPU and memory values used later are local resource choices for the Docker Desktop cluster. They are not universal KServe requirements.
+
 ---
 
-# 2. Install cert-manager
+# 2. Serving Infrastructure
 
-Knative Operator and related components require certificate management.
+The deployment uses several independent components:
 
-Install cert-manager using the version appropriate for the project environment.
+```text
+cert-manager
+      │
+      └── certificate management
 
-After installation, verify:
+Knative Operator
+      │
+      └── manages Knative installation/lifecycle
+
+Knative Serving
+      │
+      ├── serverless serving
+      ├── Revisions
+      ├── routing
+      └── autoscaling
+
+Kourier
+      │
+      └── Knative networking
+
+KServe
+      │
+      └── ML model-serving abstraction
+```
+
+Helm is used to install KServe in this project. It does **not** install the Knative Operator or Knative Serving.
+
+---
+
+## 2.1 Install cert-manager
+
+The environment uses **cert-manager v1.21.2**.
+
+Install:
+
+```bash
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.21.2/cert-manager.yaml
+```
+
+Verify:
 
 ```bash
 kubectl get pods -n cert-manager
 ```
 
-The cert-manager components should become `Running`.
+The cert-manager components should become:
+
+```text
+Running
+```
+
+cert-manager provides certificate-management infrastructure used by the serving stack.
+
+Its responsibility is separate from Knative:
+
+```text
+cert-manager
+      ↓
+certificate management
+
+Knative Operator
+      ↓
+Knative component lifecycle
+
+Knative Serving
+      ↓
+serverless serving and autoscaling
+```
 
 ---
 
-# 3. Install the Knative Operator
+## 2.2 Install the Knative Operator
 
-The project uses the Knative Operator to manage Knative Serving.
+The project uses **Knative Operator v1.20.0**.
 
-After installation:
+Install:
+
+```bash
+kubectl apply -f https://github.com/knative/operator/releases/download/knative-v1.20.0/operator.yaml
+```
+
+Verify:
 
 ```bash
 kubectl get pods -n knative-operator
 ```
 
-Expected components include:
-
-```text
-knative-operator
-operator-webhook
-```
-
-The operator manages the Knative custom resources.
-
-The important distinction is:
-
-```text
-Knative Operator
-        ↓
-manages
-        ↓
-Knative Serving
-```
-
-The Operator itself is not the request router or autoscaler.
+The Operator is responsible for managing Knative custom resources and their corresponding Knative components.
 
 ---
 
-# 4. Install Knative Serving
+## 2.3 Install Knative Serving
 
-The project defines Knative Serving through:
+The repository contains:
 
 ```text
-kserve-knative-serving.yaml
+knative-serving.yaml
 ```
 
-The resulting architecture contains Knative Serving components responsible for:
+This creates the `KnativeServing` custom resource:
 
-* Serving revisions
-* Routing
-* Activation
-* Autoscaling
-* Scale-to-zero
+```yaml
+apiVersion: operator.knative.dev/v1beta1
+kind: KnativeServing
+metadata:
+  name: knative-serving
+  namespace: knative-serving
+```
 
-Check:
+Apply:
+
+```bash
+kubectl apply -f knative-serving.yaml
+```
+
+Verify:
 
 ```bash
 kubectl get knativeserving -n knative-serving
 ```
 
-The resource should eventually report:
+Expected:
 
 ```text
-READY=True
+NAME              VERSION   READY
+knative-serving   1.20.0    True
 ```
+
+Knative Serving provides the infrastructure for:
+
+* serving
+* Revisions
+* routing
+* activation
+* autoscaling
+* scale-to-zero
+
+A networking implementation is still required.
 
 ---
 
-# 5. Install Kourier
+## 2.4 Install Kourier
 
-The project uses Kourier rather than Istio as the Knative networking layer.
+This deployment uses **Kourier v1.20.0** as the networking implementation for Knative Serving.
 
-Install the matching Kourier release:
+Install:
 
 ```bash
 kubectl apply -f https://github.com/knative-extensions/net-kourier/releases/download/knative-v1.20.0/kourier.yaml
@@ -139,30 +246,26 @@ Verify:
 kubectl get pods -n kourier-system
 ```
 
-The important components are:
+Important components include:
 
 ```text
 3scale-kourier-gateway
 net-kourier-controller
 ```
 
-Kourier provides networking/ingress.
-
-It is not responsible for scale-to-zero.
+Kourier provides the networking/ingress layer for Knative.
 
 ---
 
-# 6. Configure Knative to Use Kourier
+## 2.5 Configure Knative to Use Kourier
 
-The Knative Serving configuration must use Kourier as its ingress class.
-
-The project configured:
+The selected ingress class is:
 
 ```text
 kourier.ingress.networking.knative.dev
 ```
 
-The Knative configuration was patched with:
+Apply the configuration:
 
 ```bash
 kubectl patch knativeserving knative-serving \
@@ -177,19 +280,43 @@ Verify:
 kubectl get knativeserving -n knative-serving
 ```
 
-Wait until:
+Wait for:
 
 ```text
 READY=True
 ```
 
+The important networking relationship is:
+
+```text
+Client
+  ↓
+Kourier
+  ↓
+Knative networking
+  ↓
+Knative Route / Revision
+  ↓
+KServe predictor
+```
+
+### KServe and Istio
+
+Because this deployment uses Kourier instead of Istio, the KServe serverless configuration uses:
+
+```yaml
+disableIstioVirtualHost: true
+```
+
+This prevents KServe's serverless configuration from relying on the Istio VirtualHost path while Kourier is the selected Knative networking implementation.
+
 ---
 
-# 7. KServe Installation
+# 3. Install KServe
 
-KServe was installed using Helm.
+KServe uses Helm **v0.20.0** in this deployment.
 
-Create the KServe namespace and install the CRDs:
+## 3.1 Install KServe CRDs
 
 ```bash
 helm install kserve-crd \
@@ -199,7 +326,9 @@ helm install kserve-crd \
   --create-namespace
 ```
 
-Install KServe resources in Knative mode:
+The CRD release provides the Kubernetes custom resource definitions required by KServe.
+
+## 3.2 Install KServe Resources
 
 ```bash
 helm install kserve-resources \
@@ -216,45 +345,93 @@ Verify:
 helm list -n kserve
 ```
 
-The project used:
+The important configuration is:
 
 ```text
-KServe v0.20.0
+deploymentMode=Knative
 ```
 
----
+This tells KServe to use the Knative deployment path for predictors.
 
-# 8. Configure KServe for Kourier
-
-KServe's default serverless networking configuration assumes Istio-related resources.
-
-Because this project uses Kourier, the KServe configuration disables KServe's Istio VirtualService handling:
-
-```yaml
-disableIstioVirtualHost: true
-```
-
-This is important because:
+The resulting relationship is:
 
 ```text
 KServe
   ↓
-Knative
+deploymentMode=Knative
   ↓
-Kourier
+Knative-backed predictor
 ```
-
-is the networking path used here.
-
-Istio is not installed as the ingress layer for this deployment.
 
 ---
 
-# 9. Kubernetes Model Storage
+# 4. The HousePred Serving Pipeline
 
-The model is stored on a Kubernetes PersistentVolume.
+Before creating the model resources, it is useful to understand the three things being declared.
 
-The project uses a PVC:
+```text
+1. Serving Runtime
+   serving-runtime.yaml
+   ↓
+   HOW to run the model
+
+2. Model Storage
+   pvc.yaml + model-loader
+   ↓
+   WHERE the model is
+
+3. InferenceService
+   inference-service.yaml
+   ↓
+   WHAT model to serve
+```
+
+These are combined by KServe:
+
+```text
+Serving Runtime ──────── HOW
+        │
+        │
+Model Storage ────────── WHERE
+        │
+        │
+InferenceService ─────── WHAT
+        │
+        ▼
+      KServe
+        │
+        ▼
+  Knative deployment
+        │
+        ▼
+ Kubernetes workload
+```
+
+This is the central mental model for the deployment.
+
+---
+
+# 5. Prepare Model Storage
+
+The trained model is stored separately from the KServe runtime.
+
+The model artifact is:
+
+```text
+linear_regression_model.joblib
+```
+
+For this local deployment, the model is stored in a Kubernetes PersistentVolume through a PersistentVolumeClaim.
+
+## 5.1 Create the PVC
+
+Repository file:
+
+```text
+pvc.yaml
+```
+
+Configuration:
 
 ```yaml
 apiVersion: v1
@@ -274,7 +451,7 @@ spec:
 Apply:
 
 ```bash
-kubectl apply -f kserve-model-pvc.yaml
+kubectl apply -f pvc.yaml
 ```
 
 Check:
@@ -289,31 +466,49 @@ The PVC should reach:
 Bound
 ```
 
-Docker Desktop provides the `hostpath` StorageClass used by this local cluster.
+Docker Desktop Kubernetes provides the `hostpath` StorageClass used by this local setup.
+
+The storage relationship is:
+
+```text
+PersistentVolume
+      ↓
+PVC
+      ↓
+model storage
+```
 
 ---
 
-# 10. Load the Model
+## 5.2 Load the Model into the PVC
 
-For this local setup, a temporary loader Pod was used to mount the PVC.
+A temporary Pod is used to copy the existing model into the PVC.
 
-The loader mounts:
+Repository file:
 
 ```text
-kserve-model-pvc
-        ↓
+model-loader.yaml
+```
+
+Apply:
+
+```bash
+kubectl apply -f model-loader.yaml
+```
+
+The loader mounts the PVC at:
+
+```text
 /mnt/models
 ```
 
-The model file:
+The model is copied into:
 
 ```text
-linear_regression_model.joblib
+/mnt/models/linear_regression_model.joblib
 ```
 
-was copied into the mounted volume.
-
-Because Git Bash on Windows can rewrite Kubernetes paths, the copy command used:
+Because the project is operated from Git Bash on Windows, MSYS path conversion must be disabled for `kubectl cp`:
 
 ```bash
 MSYS_NO_PATHCONV=1 kubectl cp \
@@ -329,33 +524,50 @@ MSYS_NO_PATHCONV=1 kubectl exec \
   -- ls -lh /mnt/models
 ```
 
-The expected file is:
+Expected:
 
 ```text
 linear_regression_model.joblib
 ```
 
-The temporary loader Pod can then be deleted.
+Once the model has been copied successfully, the temporary loader can be deleted:
 
-The model remains on the PVC.
+```bash
+kubectl delete -f model-loader.yaml
+```
+
+The model remains in the persistent volume.
+
+Final storage relationship:
+
+```text
+PersistentVolume
+      ↓
+PVC: kserve-model-pvc
+      ↓
+/mnt/models
+      ↓
+linear_regression_model.joblib
+```
+
+The loader is only used to populate the persistent storage.
 
 ---
 
-# 11. Install the KServe Scikit-Learn Runtime
+# 6. Configure the KServe Model Runtime
 
-KServe's `InferenceService` needs a runtime capable of loading the model format.
+HousePred uses a **Scikit-Learn** model, so the `InferenceService` needs a runtime capable of loading and serving a Scikit-Learn model.
 
-The project installed the KServe scikit-learn runtime:
+Repository file:
 
-```bash
-curl -L -o kserve-sklearnserver.yaml \
-  https://raw.githubusercontent.com/kserve/kserve/v0.20.0/config/runtimes/kserve-sklearnserver.yaml
+```text
+serving-runtime.yaml
 ```
 
 Apply:
 
 ```bash
-kubectl apply -f kserve-sklearnserver.yaml
+kubectl apply -f serving-runtime.yaml
 ```
 
 Verify:
@@ -364,17 +576,29 @@ Verify:
 kubectl get clusterservingruntime
 ```
 
-The runtime uses:
+The configured runtime uses:
 
 ```text
 kserve/sklearnserver:latest
 ```
 
-The important point is that the runtime provides the model-serving container. The project does not need to run the FastAPI application for this KServe deployment.
+The runtime relationship is:
+
+```text
+KServe
+  ↓
+ClusterServingRuntime
+  ↓
+kserve-sklearnserver
+  ↓
+Scikit-Learn model
+```
+
+The runtime defines **HOW** the model is served.
 
 ---
 
-# 12. Resource Requests
+## 6.1 Runtime Resources
 
 The initial runtime configuration requested:
 
@@ -383,7 +607,14 @@ CPU:    1
 Memory: 2Gi
 ```
 
-On the Docker Desktop Kubernetes node, available resources were already heavily allocated.
+This was too expensive for the available Docker Desktop Kubernetes node because the node was already running:
+
+* Kubernetes
+* cert-manager
+* Knative Operator
+* Knative Serving
+* Kourier
+* KServe
 
 The runtime was therefore reduced to:
 
@@ -397,17 +628,21 @@ resources:
     memory: 1Gi
 ```
 
-This allowed the model-serving Pod to be scheduled in the local Docker Desktop cluster.
-
-This is a local-cluster scheduling consideration, not a KServe requirement that every production deployment use these exact values.
+These are **local-cluster resource choices**, not universal KServe requirements.
 
 ---
 
-# 13. Create the InferenceService
+# 7. Create the InferenceService
 
-The HousePred model is represented by an `InferenceService`.
+The HousePred model is represented by a KServe `InferenceService`.
 
-The project uses:
+Repository file:
+
+```text
+inference-service.yaml
+```
+
+Configuration:
 
 ```yaml
 apiVersion: serving.kserve.io/v1beta1
@@ -427,22 +662,8 @@ spec:
 Apply:
 
 ```bash
-kubectl apply -f kserve-housepred-model.yaml
+kubectl apply -f inference-service.yaml
 ```
-
-The important setting is:
-
-```yaml
-minReplicas: 0
-```
-
-This allows the Knative-backed deployment to scale the model down to zero when idle.
-
----
-
-# 14. KServe → Knative Resources
-
-KServe creates the serving resources needed for the predictor.
 
 Check:
 
@@ -450,59 +671,96 @@ Check:
 kubectl get inferenceservice -n kserve
 ```
 
-Then inspect the generated Knative resources:
+The important settings are:
 
-```bash
-kubectl get configuration -n kserve
-kubectl get revision -n kserve
-kubectl get route -n kserve
-kubectl get service -n kserve
+```yaml
+minReplicas: 0
 ```
 
-The resulting structure is approximately:
+and:
+
+```yaml
+storageUri: pvc://kserve-model-pvc
+```
+
+`minReplicas: 0` allows the Knative-backed predictor to scale to zero.
+
+The `storageUri` tells KServe where the model artifact is located.
+
+The model-serving relationship is:
+
+```text
+InferenceService
+      │
+      ├── model format: sklearn
+      │
+      └── storageUri
+             ↓
+        kserve-model-pvc
+             ↓
+linear_regression_model.joblib
+```
+
+---
+
+# 8. KServe Predictor Resource Lifecycle
+
+KServe reconciles the `InferenceService` and creates the resources required to run the predictor.
+
+The lifecycle can be simplified as:
 
 ```text
 InferenceService
       ↓
-Knative Configuration
-      ↓
-Knative Revision
-      ↓
-Knative Route
+KServe Controller
       ↓
 Knative Service
       ↓
+Revision
+      ↓
+Deployment
+      ↓
+ReplicaSet
+      ↓
+Pod
+```
+
+This is a **controller reconciliation process**, not a literal compilation step.
+
+When the predictor is running, the Pod contains two containers:
+
+```text
 Predictor Pod
+│
+├── sklearnserver
+│     ├── KServe model-serving runtime
+│     ├── loads the model
+│     └── performs inference
+│
+└── queue-proxy
+      ├── Knative sidecar
+      └── participates in traffic/concurrency handling
 ```
 
-The predictor revision can have:
+Therefore:
 
 ```text
-ACTUAL REPLICAS: 0
-DESIRED REPLICAS: 0
+2/2 Running
 ```
 
-when idle.
+means **one Pod containing two containers**, not two predictor replicas.
 
-That is the expected scale-to-zero state.
+The `sklearnserver` container is responsible for model inference.
+
+The `queue-proxy` is part of the Knative serving infrastructure and participates in request handling and concurrency measurement.
 
 ---
 
-# 15. Verify the KServe Service
+# 9. Test the Model
 
-The generated predictor Service in this Kourier configuration is backed by:
+A temporary curl Pod can be used to test the service from inside the Kubernetes cluster.
 
-```text
-kourier-internal.knative-serving.svc.cluster.local
-```
-
-The project intentionally disables KServe's Istio VirtualService handling because Kourier is the selected networking layer.
-
----
-
-# 16. Test the Model Internally
-
-A temporary curl Pod can be used to test the service from inside Kubernetes:
+Start the Pod:
 
 ```bash
 kubectl run curl \
@@ -512,28 +770,130 @@ kubectl run curl \
   -- sh
 ```
 
-Inside the Pod:
+Inside the Pod, send a prediction request:
 
 ```bash
 curl -X POST \
-  http://house-model-predictor.kserve.svc.cluster.local/v1/models/house-model:predict \
+  -H "Host: house-model-predictor.kserve.svc.cluster.local" \
   -H "Content-Type: application/json" \
-  -d '{"instances":[[8.3252,37.88,-122.23,6.9841,41.0]]}'
+  -d '{"instances":[[8.3252,37.88,-122.23,6.9841,41.0]]}' \
+  http://kourier-internal.knative-serving.svc.cluster.local/v1/models/house-model:predict
 ```
 
-The completed deployment returned:
+The request uses the Kourier internal service and the Knative/KServe host name so that it follows the same routing path used by the Knative deployment.
 
-```json
-{"predictions":[4.080089668998603]}
-```
-
-The prediction is the same as the FastAPI and BentoML implementations because the underlying model is the same.
+The model being served is the same trained HousePred model used by the other serving implementations.
 
 ---
 
-# 17. Observe Scale-to-Zero
+# 10. Request Flow
 
-When the service is idle, the revision can reach:
+The actual request path is separate from the autoscaling/control path.
+
+## Request Path
+
+```text
+Client
+  ↓
+Kourier
+  ↓
+Knative Route
+  ↓
+Revision
+  ↓
+Revision Service
+  ↓
+Predictor Pod
+  ↓
+queue-proxy
+  ↓
+sklearnserver
+  ↓
+HousePred model
+  ↓
+Prediction
+```
+
+## Scaling / Control Path
+
+```text
+                    Knative Serving
+                           │
+                           ▼
+                          KPA
+                           │
+                           ▼
+                scaling decisions
+                           │
+                    ┌──────┴──────┐
+                    │             │
+                  scale up      scale down
+                    │             │
+                    ▼             ▼
+                 Pods          0 Pods
+```
+
+KPA is therefore **not a request hop**. It observes serving activity and makes scaling decisions.
+
+---
+
+# 11. Component Responsibilities
+
+| Component             | Responsibility                                                          |
+| --------------------- | ----------------------------------------------------------------------- |
+| Kubernetes            | Container orchestration, scheduling, storage, and networking primitives |
+| KServe                | Kubernetes-native ML-serving abstraction                                |
+| InferenceService      | Declarative definition of the model to serve                            |
+| ClusterServingRuntime | Defines the model-serving runtime                                       |
+| Knative Operator      | Installation and lifecycle management of Knative components             |
+| Knative Serving       | Serverless serving, Revisions, routing, activation, and autoscaling     |
+| KPA                   | Request/concurrency-driven autoscaling                                  |
+| Kourier               | Knative networking / ingress                                            |
+| sklearnserver         | Scikit-Learn model-serving runtime                                      |
+| PVC                   | Persistent model artifact storage                                       |
+| cert-manager          | Certificate-management infrastructure                                   |
+
+The simplified responsibility model is:
+
+```text
+KServe
+  ↓
+ML-serving abstraction
+
+Knative
+  ↓
+Serverless serving
+
+KPA
+  ↓
+Request-driven scaling
+
+Kourier
+  ↓
+Networking
+
+sklearnserver
+  ↓
+Model inference
+
+PVC
+  ↓
+Model storage
+```
+
+---
+
+# 12. Scale-to-Zero
+
+The predictor is configured with:
+
+```yaml
+minReplicas: 0
+```
+
+When there is no sustained traffic, Knative can scale the Revision down to zero.
+
+The resulting state can be observed with:
 
 ```text
 ACTUAL REPLICAS: 0
@@ -543,13 +903,16 @@ DESIRED REPLICAS: 0
 Conceptually:
 
 ```text
-                 No requests
-                     │
-                     ▼
-                  0 Pods
+No sustained traffic
+        ↓
+       KPA
+        ↓
+Scaling decision
+        ↓
+0 predictor Pods
 ```
 
-When a request arrives:
+When a new request arrives while the Revision is scaled to zero, Knative activates the Revision and starts the required workload.
 
 ```text
 Request
@@ -558,100 +921,172 @@ Kourier
    ↓
 Knative
    ↓
-Activator / autoscaling
+Activation / scale-from-zero
    ↓
-Predictor Pod
+Predictor Pod starts
    ↓
 KServe runtime
    ↓
-Sklearn model
+Model
    ↓
 Prediction
 ```
 
-After the service becomes idle again:
+After the Revision becomes idle again:
 
 ```text
 Predictor Pod
-     ↓
-   idle
-     ↓
+      ↓
+    idle
+      ↓
+     KPA
+      ↓
 scale down
-     ↓
+      ↓
    0 Pods
 ```
 
+This request-driven scaling behavior is the main serverless capability demonstrated by the deployment.
+
 ---
 
-# 18. Cold Start vs Warm Request
+# 13. Cold Start vs Warm Request
 
-The project demonstrated two different request paths.
+## Cold Request
 
-### Cold request
+When the predictor has scaled to zero:
 
 ```text
 Request
-  ↓
+   ↓
 Knative activation
-  ↓
+   ↓
 Pod creation
-  ↓
+   ↓
 Container startup
-  ↓
+   ↓
 Model loading
-  ↓
+   ↓
 Prediction
 ```
 
-This request is slower.
+The request experiences cold-start overhead.
 
-### Warm request
+## Warm Request
+
+When the predictor Pod is already running:
 
 ```text
 Request
-  ↓
+   ↓
 Existing predictor Pod
-  ↓
+   ↓
 Loaded model
-  ↓
+   ↓
 Prediction
 ```
 
-This request is faster.
+The warm request avoids the scale-from-zero startup path.
 
-The fundamental trade-off is:
-
-> Scale-to-zero reduces idle resource consumption at the cost of cold-start latency.
-
----
-
-# 19. KServe Standard Mode
-
-**KServe Standard mode was not implemented in this project.**
-
-It was studied conceptually as the alternative to Knative mode.
-
-The implemented deployment is:
+The trade-off is:
 
 ```text
-KServe
-  ↓
-Knative
-  ↓
-Kourier
-  ↓
-scale-to-zero
+Scale-to-zero
+     ↓
+Lower idle resource usage
+     +
+Higher cold-start latency
 ```
-
-Standard mode would instead use ordinary Kubernetes deployment mechanisms and does not provide the same Knative request-driven scale-to-zero behavior.
-
-Therefore this repository should not claim that both KServe deployment modes were implemented.
 
 ---
 
-# 20. Final Architecture
+# 14. Tune Knative Autoscaling
 
-The completed HousePred KServe deployment is:
+The Knative autoscaler configuration can be inspected with:
+
+```bash
+kubectl get configmap config-autoscaler \
+  -n knative-serving \
+  -o yaml
+```
+
+The relevant configuration used during the deployment included:
+
+```yaml
+stable-window: "60s"
+scale-to-zero-grace-period: "30s"
+scale-to-zero-pod-retention-period: "0s"
+scale-down-delay: "0s"
+```
+
+For this local experiment, the stable window was changed from `60s` to `180s`:
+
+```bash
+kubectl patch configmap config-autoscaler \
+  -n knative-serving \
+  --type merge \
+  -p '{"data":{"stable-window":"180s"}}'
+```
+
+Verify:
+
+```bash
+kubectl get configmap config-autoscaler \
+  -n knative-serving \
+  -o jsonpath='{.data.stable-window}{"\n"}'
+```
+
+Expected:
+
+```text
+180s
+```
+
+The `180s` value is a local tuning choice for observing the deployment. It is not a universal Knative requirement.
+
+> Note: `config-autoscaler` is managed by the Knative Operator. A direct patch can be overwritten by Operator reconciliation. Persistent configuration should therefore be maintained through the `KnativeServing` configuration rather than treating the generated ConfigMap as the long-term source of truth.
+
+---
+
+# 15. Troubleshooting and Integration Notes
+
+### Runtime Resource Pressure
+
+The initial predictor resource configuration was too large for the available Docker Desktop node.
+
+### Knative Networking
+
+The deployment initially encountered networking configuration issues around the Istio path.
+
+Kourier was selected as the final networking implementation:
+
+```text
+kourier.ingress.networking.knative.dev
+```
+
+Kourier was explicitly enabled in the `KnativeServing` configuration.
+
+---
+
+### KServe and Istio
+
+Because Kourier is used instead of Istio, the KServe serverless configuration uses:
+
+```yaml
+disableIstioVirtualHost: true
+```
+
+This keeps the KServe serverless configuration aligned with the actual Knative networking implementation.
+
+---
+
+### Wdows Git Bash Path Conversion
+
+# 16. Final Architecture
+
+The completed HousePred deployment can be viewed as three related paths.
+
+## Request Path
 
 ```text
                          Client
@@ -660,39 +1095,160 @@ The completed HousePred KServe deployment is:
                         Kourier
                            │
                            ▼
-                     Knative Serving
+                    Knative Route
                            │
-                    request-driven KPA
+                           ▼
+                       Revision
+                           │
+                           ▼
+                  Revision Service
+                           │
+                           ▼
+                    Predictor Pod
                            │
                     ┌──────┴──────┐
                     │             │
-                 1+ Pods        0 Pods
-                    │          when idle
-                    │
-                    ▼
-               KServe Predictor
-                    │
-                    ▼
-             sklearnserver runtime
-                    │
-                    ▼
-              HousePred model
-                    │
-                    ▼
-                Prediction
+              queue-proxy    sklearnserver
+                                  │
+                                  ▼
+                           HousePred model
+                                  │
+                                  ▼
+                              Prediction
 ```
 
-The major components have separate responsibilities:
+## Scaling Path
 
-| Component        | Responsibility                                |
-| ---------------- | --------------------------------------------- |
-| Kubernetes       | Container orchestration and resources         |
-| KServe           | ML model-serving abstraction                  |
-| InferenceService | Declarative model-serving resource            |
-| Knative          | Serverless serving and request-driven scaling |
-| KPA              | Knative autoscaling                           |
-| Kourier          | Networking / ingress                          |
-| sklearnserver    | Scikit-learn model-serving runtime            |
-| PVC              | Model artifact storage                        |
+```text
+                    Knative Serving
+                           │
+                           ▼
+                          KPA
+                           │
+                 ┌─────────┴─────────┐
+                 │                   │
+              scale up            scale down
+                 │                   │
+                 ▼                   ▼
+              1+ Pods              0 Pods
+```
 
-This is the most infrastructure-heavy serving architecture implemented in HousePred, but it demonstrates the largest set of ML-serving platform capabilities, particularly request-driven autoscaling and scale-to-zero.
+## Model Storage Path
+
+```text
+PersistentVolume
+      │
+      ▼
+     PVC
+      │
+      ▼
+linear_regression_model.joblib
+      │
+      ▼
+KServe Predictor
+      │
+      ▼
+sklearnserver
+```
+
+---
+
+# 17. HousePred in the Serving Stack
+
+HousePred uses the same trained model across several serving approaches:
+
+```text
+FastAPI
+   ↓
+Application-level serving
+
+BentoML
+   ↓
+ML-focused application serving
+
+KServe
+   ↓
+Kubernetes-native ML serving
+
+KServe + Knative
+   ↓
+Kubernetes-native ML serving
++
+Serverless serving
++
+Request-driven autoscaling
++
+Scale-to-zero
++
+Revision-based serving
+```
+
+The progression demonstrated by the project is therefore:
+
+```text
+Application serving
+        ↓
+ML-serving framework
+        ↓
+Kubernetes-native ML serving
+        ↓
+Kubernetes-native serverless ML serving
+```
+
+The architectural responsibilities are:
+
+```text
+KServe
+    → ML-serving abstraction
+
+Knative
+    → serverless serving and autoscaling
+
+Kourier
+    → networking
+
+KServe model runtime
+    → model inference
+
+PVC
+    → model artifact storage
+```
+
+---
+
+# 18. Final Mental Model
+
+The simplest way to understand the complete deployment is:
+
+```text
+You declare
+     │
+     ├── Serving Runtime
+     │      → HOW to run the model
+     │
+     ├── PVC + model-loader
+     │      → WHERE the model is
+     │
+     └── InferenceService
+            → WHAT model to serve
+                    │
+                    ▼
+                  KServe
+                    │
+                    ▼
+             Knative resources
+             ├── Configuration
+             ├── Revision
+             ├── Service
+             └── Route
+                    │
+                    ▼
+                 Kubernetes
+             ├── Deployment
+             ├── ReplicaSet
+             └── Pod
+```
+
+In one sentence:
+
+> **KServe defines what model to serve and how to serve it, Knative provides the serverless execution and autoscaling behavior, Kourier provides networking, and Kubernetes runs the resulting workloads.**

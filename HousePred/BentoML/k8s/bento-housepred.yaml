@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: housepred-bento
+  namespace: bentoml
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: housepred-bento
+  template:
+    metadata:
+      labels:
+        app: housepred-bento
+    spec:
+      containers:
+        - name: housepred
+          image: house_price_service:k4p3o6v6pgcsjabl
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 3000
+
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 3000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "128Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: housepred-bento
+  namespace: bentoml
+spec:
+  type: NodePort
+  selector:
+    app: housepred-bento
+  ports:
+    - port: 3000
+      targetPort: 3000
+      nodePort: 30090

@@ -1,0 +1,18 @@
+apiVersion: serving.kserve.io/v1beta1
+kind: InferenceService
+metadata:
+  name: house-model
+  namespace: kserve
+spec:
+  predictor:
+    model:
+      modelFormat:
+        name: sklearn
+      storageUri: pvc://kserve-model-pvc
+      resources:
+        requests:
+          cpu: "250m"
+          memory: "512Mi"
+        limits:
+          cpu: "500m"
+          memory: "1Gi"

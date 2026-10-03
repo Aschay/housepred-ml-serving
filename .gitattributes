@@ -1,0 +1,14 @@
+* text=auto
+# Shell scripts must always use LF
+*.sh text eol=lf
+# Python files use LF
+*.py text eol=lf
+# Markdown files use LF
+*.md text eol=lf
+# Docker
+Dockerfile text eol=lf
+# Shell
+*.sh text eol=lf
+
+*.yaml linguist-language=YAML
+*.yml linguist-language=YAML

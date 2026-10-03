@@ -1,0 +1,12 @@
+service: "service:HousePriceService"
+
+include:
+  - "service.py"
+  - "model/linear_regression_model.joblib"
+
+python:
+  packages:
+    - scikit-learn==1.9.0
+    - joblib==1.5.3
+    - numpy==2.4.2
+    - pandas

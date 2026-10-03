@@ -13,6 +13,13 @@ The same California Housing linear-regression model is served through several ap
 * KServe Standard on Kubernetes
 * KServe with Knative on Kubernetes
 
+## Setup Guides
+
+- [FastAPI Deployment](docs/FASTAPI.md)
+- [BentoML Deployment](docs/BENTOML.md)
+- [KServe + Knative ](docs/KSERVE-KNATIVE.md)
+- [KServe Standard](docs/KSERVE-STANDARD.md)
+
 The goal is not to compare model quality. The goal is to understand the **serving abstractions, Kubernetes resources, networking, scaling, model storage, and deployment behavior** provided by each approach.
 
 ---
